@@ -91,16 +91,22 @@ def build_payload():
     df = pd.read_csv(RISK_PATH)
     latest_date = df["date"].max()
     latest = df[df["date"] == latest_date].copy()
+    all_scores = df.copy()
     latest["country_name_ko"] = latest["country"].map(COUNTRY_KO).fillna(latest["country"])
     latest["risk_label"] = latest["risk_score"].map(risk_label)
     latest = latest.sort_values("risk_score", ascending=False)
+    all_scores["country_name_ko"] = all_scores["country"].map(COUNTRY_KO).fillna(all_scores["country"])
+    all_scores["risk_label"] = all_scores["risk_score"].map(risk_label)
+    all_scores = all_scores.sort_values(["date", "risk_score"], ascending=[True, False])
 
     trend = df.sort_values(["country", "date"]).copy()
     trend["country_name_ko"] = trend["country"].map(COUNTRY_KO).fillna(trend["country"])
 
     return {
+        "dates": sorted(df["date"].unique().tolist()),
         "latest_date": latest_date,
         "latest": latest.to_dict(orient="records"),
+        "records": all_scores.to_dict(orient="records"),
         "trend": {
             country: group[
                 [
@@ -217,6 +223,24 @@ HTML_TEMPLATE = r"""<!doctype html>
       border-radius: 8px;
       color: var(--muted);
       font-size: 14px;
+    }
+
+    .date-pill label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .date-pill select {
+      width: 150px;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 800;
+      outline: none;
+      cursor: pointer;
     }
 
     .map-area {
@@ -393,7 +417,10 @@ HTML_TEMPLATE = r"""<!doctype html>
         <h1>세계 분쟁 위험도 모니터</h1>
         <p class="subtitle">뉴스를 깊게 따라가지 않아도 국가별 위험 신호를 빠르게 볼 수 있도록 만든 한국어 대시보드입니다. 지도에서 국가를 선택하면 예측 위험도와 그 점수를 구성하는 요소를 함께 확인할 수 있습니다.</p>
       </div>
-      <div class="date-pill">기준일 <strong id="latestDate"></strong></div>
+      <div class="date-pill">
+        <label for="dateSelect">기준일</label>
+        <select id="dateSelect" aria-label="기준일 선택"></select>
+      </div>
     </header>
 
     <main class="map-area">
@@ -428,8 +455,15 @@ HTML_TEMPLATE = r"""<!doctype html>
   <script>__PLOTLY_JS__</script>
   <script>
     const APP_DATA = __APP_DATA__;
-    const latest = APP_DATA.latest;
-    const byCountry = Object.fromEntries(latest.map(d => [d.country, d]));
+    const recordsByDate = APP_DATA.records.reduce((acc, row) => {
+      if (!acc[row.date]) acc[row.date] = [];
+      acc[row.date].push(row);
+      return acc;
+    }, {});
+    let selectedDate = APP_DATA.latest_date;
+    let latest = recordsByDate[selectedDate] || APP_DATA.latest;
+    let byCountry = Object.fromEntries(latest.map(d => [d.country, d]));
+    let selectedCountry = latest[0].country;
     const colors = {
       "낮음": "#1b9e77",
       "주의": "#e9c46a",
@@ -438,7 +472,18 @@ HTML_TEMPLATE = r"""<!doctype html>
       "매우 높음": "#7f1d1d"
     };
 
-    document.getElementById("latestDate").textContent = APP_DATA.latest_date;
+    const dateSelect = document.getElementById("dateSelect");
+    dateSelect.innerHTML = APP_DATA.dates.map(date => `<option value="${date}">${date}</option>`).join("");
+    dateSelect.value = selectedDate;
+    dateSelect.addEventListener("change", () => {
+      selectedDate = dateSelect.value;
+      latest = recordsByDate[selectedDate] || [];
+      byCountry = Object.fromEntries(latest.map(d => [d.country, d]));
+      if (!byCountry[selectedCountry]) selectedCountry = latest[0]?.country;
+      updateMap();
+      drawRanking();
+      selectCountry(selectedCountry);
+    });
 
     function riskColor(score) {
       if (score >= 80) return colors["매우 높음"];
@@ -505,6 +550,16 @@ HTML_TEMPLATE = r"""<!doctype html>
       });
     }
 
+    function updateMap() {
+      const update = {
+        locations: [latest.map(d => d.country)],
+        z: [latest.map(d => d.risk_score)],
+        text: [latest.map(d => `${d.country_name_ko} (${d.country})`)],
+        customdata: [latest.map(d => d.country)]
+      };
+      Plotly.restyle("map", update);
+    }
+
     function drawTrend(iso) {
       const rows = APP_DATA.trend[iso] || [];
       const country = byCountry[iso];
@@ -522,7 +577,16 @@ HTML_TEMPLATE = r"""<!doctype html>
         paper_bgcolor: "rgba(0,0,0,0)",
         plot_bgcolor: "rgba(0,0,0,0)",
         yaxis: { range: [0, 100], gridcolor: "#e7ebe4" },
-        xaxis: { showgrid: false }
+        xaxis: { showgrid: false },
+        shapes: [{
+          type: "line",
+          x0: selectedDate,
+          x1: selectedDate,
+          y0: 0,
+          y1: 100,
+          yref: "y",
+          line: { color: "#18201c", width: 1, dash: "dot" }
+        }]
       };
       Plotly.newPlot("trend", [trace], layout, { responsive: true, displayModeBar: false });
     }
@@ -540,6 +604,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     function selectCountry(iso) {
       const d = byCountry[iso];
       if (!d) return;
+      selectedCountry = iso;
 
       const label = document.getElementById("riskLabel");
       label.textContent = d.risk_label;
@@ -558,7 +623,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       ].join("");
 
       document.getElementById("explainText").textContent =
-        `예측 확률은 ${(d.y_prob * 100).toFixed(2)}%입니다. 종합 점수는 장기 위험도, 최근 상태 변화, 모델 예측값을 합산해 0-100점으로 환산했습니다.`;
+        `${selectedDate} 기준 단기 악화 가능성은 ${(d.y_prob * 100).toFixed(2)}%로 추정됩니다. 종합 점수는 장기 위험도, 최근 상태 변화, 모델 예측값을 합산해 0-100점으로 환산했습니다.`;
 
       drawTrend(iso);
     }
