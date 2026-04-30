@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Local/editor files
+.DS_Store
+.vscode/
+
+# Large source data and generated model artifacts
+full.parquet
+processed/
+artifacts/
+
+# Keep the deployable static site in docs/.
+site/
+
+# Optional local reports or references that are not needed for deployment
+*.pdf
